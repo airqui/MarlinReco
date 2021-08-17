@@ -47,6 +47,8 @@ using namespace lcio ;
 using namespace marlin ;
 using namespace TOFUtils ;
 
+using ROOT::Math::XYZVector;
+
 TOFEstimators aTOFEstimators ;
 
 
@@ -378,7 +380,7 @@ void TOFEstimators::processEvent( LCEvent * evt ) {
             const Track* track = pfo->getTracks()[0];
             const Cluster* cluster = pfo->getClusters()[0];
 
-            float momAtCalo = getMomAtCalo(track).r();
+	    float momAtCalo = getMomAtCalo(track).r();
             float flightLength = getFlightLength(track);
             float tofClosest = getTOFClosest(track, cluster);
             float tofFastest = getTOFFastest(track, cluster);
@@ -482,19 +484,20 @@ void TOFEstimators::end(){
 
 
 dd4hep::rec::Vector3D TOFEstimators::getMomAtCalo(const Track* track){
-    const TrackState* ts = track->getTrackState(TrackState::AtCalorimeter);
-    double phi = ts->getPhi();
-    double d0 = ts->getD0();
-    double z0 = ts->getZ0();
-    double omega = ts->getOmega();
-    double tanL = ts->getTanLambda();
+  const TrackState* ts = track->getTrackState(TrackState::AtCalorimeter);
+  double phi = ts->getPhi();
+  double d0 = ts->getD0();
+  double z0 = ts->getZ0();
+  double omega = ts->getOmega();
+  double tanL = ts->getTanLambda();
 
-    HelixClass helix;
-    helix.Initialize_Canonical(phi, d0, z0, omega, tanL, _bField[2]/dd4hep::tesla);
-    return helix.getMomentum();
+  HelixClass helix;
+  helix.Initialize_Canonical(phi, d0, z0, omega, tanL, _bField[2]/dd4hep::tesla);
+  return helix.getMomentum();
 }
 
-
+/*
+//Simplistic FligthLength
 double TOFEstimators::getFlightLength(const Track* track){
     const TrackState* ts = track->getTrackState(TrackState::AtIP);
     double phiIP = ts->getPhi();
@@ -504,6 +507,211 @@ double TOFEstimators::getFlightLength(const Track* track){
     double tanLCalo = ts->getTanLambda();
 
     return abs((phiIP - phiCalo)/omegaCalo)*sqrt(1. + tanLCalo*tanLCalo);
+}
+*/
+
+/*
+//First attempt of hit by hit length
+//copied from Bohdan
+double TOFEstimators::getFlightLength(const Track* track){
+  double trackLength = 0.;
+
+  //*** track length from IP state to 1st tracker hit state***
+  const TrackState* tsIp = track->getTrackState(TrackState::AtIP);
+  double phiIP = tsIp->getPhi();
+  double omegaIP = tsIp->getOmega();
+  double tanLIP = tsIp->getTanLambda();
+  const TrackState* tsFirst = track->getTrackState(TrackState::AtFirstHit);
+  double phiFirst = tsFirst->getPhi();
+  trackLength += std::abs( (phiIP - phiFirst)/omegaIP )*std::sqrt(1. + tanLIP*tanLIP);
+
+  //*** in the tracker region sum hit-by-hit assuming straight line path between hits***
+  std::vector <TrackerHit*> trackHits = track->getTrackerHits();
+
+  auto sortByR = [](TrackerHit* a, TrackerHit* b) {
+    XYZVector posA = XYZVector(a->getPosition()[0], a->getPosition()[1], a->getPosition()[2]);
+    XYZVector posB = XYZVector(b->getPosition()[0], b->getPosition()[1], b->getPosition()[2]);
+    return posA.r() < posB.r();
+  };
+  sort(trackHits.begin(), trackHits.end(), sortByR);
+
+  for (size_t j=1; j < trackHits.size(); ++j){
+    XYZVector pos2 = XYZVector(trackHits[j]->getPosition()[0], trackHits[j]->getPosition()[1], trackHits[j]->getPosition()[2]);
+    XYZVector pos1 = XYZVector(trackHits[j-1]->getPosition()[0], trackHits[j-1]->getPosition()[1], trackHits[j-1]->getPosition()[2]);
+    trackLength += (pos2-pos1).r();
+  }
+
+
+  // track length from last tracker hit to the ECAL surface
+  const TrackState* tsLast = track->getTrackState(TrackState::AtLastHit);
+  double phiLast = tsLast->getPhi();
+  const TrackState* tsCalo = track->getTrackState(TrackState::AtCalorimeter);
+  double phiCalo = tsCalo->getPhi();
+  double omegaCalo = tsCalo->getOmega();
+  double tanLCalo = tsCalo->getTanLambda();
+
+  trackLength += std::abs( (phiLast - phiCalo)/omegaCalo )*std::sqrt(1. + tanLCalo*tanLCalo);
+  return trackLength;
+}*/
+
+
+
+// version of Mitaroff arxiv:2107.02031v1
+// approach 1, using only the track states
+// equation 20 with phi*=phi
+double TOFEstimators::getFlightLength(const Track* track){
+  double trackLength = 0.;
+  double trackLength2 = 0.;
+
+  double B = _bField[2]/dd4hep::tesla;
+  
+  //*** track length from IP state to 1st tracker hit state***
+  const TrackState* tsIp = track->getTrackState(TrackState::AtIP);
+  double phiIp = tsIp->getPhi();
+  double d0Ip = tsIp->getD0();
+  double z0Ip = tsIp->getZ0();
+  double omegaIp = tsIp->getOmega();
+  double tanLIp = tsIp->getTanLambda();
+  HelixClass helixIp;
+  helixIp.Initialize_Canonical(phiIp, d0Ip, z0Ip, omegaIp, tanLIp, _bField[2]/dd4hep::tesla);
+  double qIp = helixIp.getCharge();
+  double rhIp = helixIp.getRadius();
+  dd4hep::rec::Vector3D pIp= helixIp.getMomentum();
+  double khIp = 1./rhIp;
+ 
+  XYZVector posIp = XYZVector(tsIp->getReferencePoint()[0], tsIp->getReferencePoint()[1], tsIp->getReferencePoint()[2]);
+  streamlog_out(DEBUG) << "AtIP q="<<qIp<<" Bz="<<B<<" Ku="<<CLHEP::c_light<<" z0="<<z0Ip<<" p="<<pIp.r()<<" rh="<<rhIp<<" posR:"<<posIp.r()<<std::endl;
+
+  std::vector <TrackState*> trackSt = track->getTrackStates();
+  double phi[1000], k[1000], z[1000];
+
+  phi[0]=phiIp;
+  k[0]=khIp;
+  z[0]=tsIp->getReferencePoint()[2];
+
+  auto sortByR = [&](TrackState* ts_a, TrackState* ts_b) {
+    XYZVector posA = XYZVector(ts_a->getReferencePoint()[0], ts_a->getReferencePoint()[1], ts_a->getReferencePoint()[2]);
+    XYZVector posB = XYZVector(ts_b->getReferencePoint()[0], ts_b->getReferencePoint()[1], ts_b->getReferencePoint()[2]);
+    return posA.r() < posB.r();
+  };
+  sort(trackSt.begin(), trackSt.end(), sortByR);
+  
+  for (size_t j=1; j < trackSt.size(); ++j){
+    HelixClass helix;
+    double phi_helix = trackSt.at(j)->getPhi();
+    double d0 = trackSt.at(j)->getD0();
+    double z0 = trackSt.at(j)->getZ0();
+    double omega = trackSt.at(j)->getOmega();
+    double tanL = trackSt.at(j)->getTanLambda();
+    helix.Initialize_Canonical(phi_helix, d0, z0, omega, tanL, _bField[2]/dd4hep::tesla);
+
+    double q = helix.getCharge();
+    double rh = helix.getRadius();
+    dd4hep::rec::Vector3D p = helix.getMomentum();
+    double kh = 1./rh;
+    XYZVector pos = XYZVector(trackSt.at(j)->getReferencePoint()[0], trackSt.at(j)->getReferencePoint()[1], trackSt.at(j)->getReferencePoint()[2]);
+
+    streamlog_out(DEBUG) << "TrackState at:"<<trackSt.at(j)->getLocation()<<" q:"<<q<<" Bz="<<B<<" Ku="<<CLHEP::c_light<<" z0="<<z0<<" p="<<p.r()<<" rh="<<rh<<" posR="<<pos.r()<<std::endl;
+    phi[j]=phi_helix;
+    k[j]=kh;
+    z[j]=trackSt.at(j)->getReferencePoint()[2];
+
+    trackLength += sqrt ( pow( (phi[j]-phi[j-1])/k[j-1],2) + pow(z[j]-z[j-1],2) ) ;
+  }
+
+  const TrackState* tsCalo= track->getTrackState(TrackState::AtCalorimeter);
+  double phiCalo = tsCalo->getPhi();
+  double omegaCalo = tsCalo->getOmega();
+  double tanLCalo = tsCalo->getTanLambda();
+  
+  streamlog_out(DEBUG)<< "Simplest one:"<<((phiIp - phiCalo)/omegaCalo)*sqrt(1. + tanLCalo*tanLCalo) << " Mitaroff: "<<trackLength<<std::endl;
+
+  return trackLength;
+  }
+
+
+// version of Mitaroff arxiv:2107.02031v1
+// approach 2, using individual hits and the closest track states to define the helix radius
+// equation 20 with phi*=phi
+// WORK IN PROGRESS.... NOT SATISFACOTRY RESULTS So far
+double TOFEstimators::getFlightLengthHitByHit(const Track* track){
+  double trackLength = 0.;
+  double trackLength2 = 0.;
+  
+  double trackLengthM1=getFlightLength(track);
+  std::vector <TrackerHit*> trackHits = track->getTrackerHits();
+  
+  auto sortByR = [&](TrackerHit* a, TrackerHit* b) {
+    XYZVector posA = XYZVector(a->getPosition()[0], a->getPosition()[1], a->getPosition()[2]);
+    XYZVector posB = XYZVector(b->getPosition()[0], b->getPosition()[1], b->getPosition()[2]);
+    return posA.r() < posB.r();
+  };
+  sort(trackHits.begin(), trackHits.end(), sortByR);
+
+  double phi[1000], k[1000], z[1000];
+  double phi2[1000];
+  
+  z[0]=trackHits[0]->getPosition()[2];
+  phi2[0]=TMath::ATan(trackHits[0]->getPosition()[1]/trackHits[0]->getPosition()[0]);
+  
+  const TrackState* trackSt_0 = track->getTrackState(TrackState::AtIP);
+  HelixClass helix_0;
+  double phi_0 = trackSt_0->getPhi();
+  double d0_0 = trackSt_0->getD0();
+  double z0_0 = trackSt_0->getZ0();
+  double omega_0 = trackSt_0->getOmega();
+  double tanL_0 = trackSt_0->getTanLambda();
+  helix_0.Initialize_Canonical(phi_0, d0_0, z0_0, omega_0, tanL_0, _bField[2]/dd4hep::tesla);
+  double rh_0 = helix_0.getRadius();
+  k[0] = 1./rh_0;
+  phi[0]=phi_0;
+  
+  for (size_t j=1; j < trackHits.size(); ++j){
+    z[j]=trackHits[j]->getPosition()[2];
+    phi2[j]=TMath::ATan(trackHits[j]->getPosition()[1]/trackHits[j]->getPosition()[0]);
+    const TrackState* trackSt = track->getClosestTrackState(trackHits[j]->getPosition()[0], trackHits[j]->getPosition()[1], trackHits[j]->getPosition()[2]);
+    HelixClass helix;
+    double phi_helix = trackSt->getPhi();
+    double d0 = trackSt->getD0();
+    double z0 = trackSt->getZ0();
+    double omega = trackSt->getOmega();
+    double tanL = trackSt->getTanLambda();
+    helix.Initialize_Canonical(phi_helix, d0, z0, omega, tanL, _bField[2]/dd4hep::tesla);
+    double rh = helix.getRadius();
+    k[j] = 1./rh;
+    phi[j]=phi_helix;
+    trackLength += sqrt( pow( (phi[j]-phi[j-1])/k[j-1],2) + pow(z[j]-z[j-1],2) );
+    trackLength2 +=  sqrt( pow( (phi2[j]-phi2[j-1])/k[j-1],2) + pow(z[j]-z[j-1],2) );
+    streamlog_out(DEBUG)<<j<<" x:"<<trackHits[j]->getPosition()[0]<<" y:"<<trackHits[j]->getPosition()[1]<<" x:"<<trackHits[j]->getPosition()[2]<<" "<<trackSt->getReferencePoint()[2]<<" "<<trackSt->getLocation()<<std::endl;
+  }
+  //
+  const TrackState* trackSt_1 = track->getTrackState(TrackState::AtCalorimeter);
+  HelixClass helix_1;
+  double phi_1 = trackSt_1->getPhi();
+  double d0_1 = trackSt_1->getD0();
+  double z0_1 = trackSt_1->getZ0();
+  double omega_1 = trackSt_1->getOmega();
+  double tanL_1 = trackSt_1->getTanLambda();
+  helix_1.Initialize_Canonical(phi_1, d0_1, z0_1, omega_1, tanL_1, _bField[2]/dd4hep::tesla);
+  double rh_1 = helix_1.getRadius();
+  k[trackHits.size()] = 1./rh_1;
+  phi[trackHits.size()]=phi_1;
+  z[trackHits.size()]=trackSt_1->getReferencePoint()[2];
+  trackLength += sqrt( pow( (phi[trackHits.size()]-phi[trackHits.size()-1])/k[trackHits.size()-1],2) + pow(z[trackHits.size()]-z[trackHits.size()-1],2) );
+
+
+  //
+  const TrackState* ts = track->getTrackState(TrackState::AtIP);
+  double phiIP = ts->getPhi();
+  const TrackState* tsCalo= track->getTrackState(TrackState::AtCalorimeter);
+  double phiCalo = tsCalo->getPhi();
+  double omegaCalo = tsCalo->getOmega();
+  double tanLCalo = tsCalo->getTanLambda();
+  
+  streamlog_out(DEBUG)<< "Simplest one:"<<((phiIP - phiCalo)/omegaCalo)*sqrt(1. + tanLCalo*tanLCalo) <<  "  Mitaroff_v1.1:"<<trackLengthM1<<"  Mitaroff_v2.1:"<<trackLength<<"  Mitaroff_v2.2:"<<trackLength2<<std::endl;
+
+  //  trackLength=sqrt(trackLength);
+  return trackLength;
 }
 
 

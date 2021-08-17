@@ -135,6 +135,7 @@ class TOFEstimators : public Processor {
     Can be used for more precise mass calculation
     */
     dd4hep::rec::Vector3D getMomAtCalo(const Track*);
+    float getMomAtCaloMitaroff(const Track*);
 
     /** Track length of the helix between IP and ECAL entrance
     * assuming IP at (0, 0, 0) and ECAL entry point is
@@ -146,6 +147,8 @@ class TOFEstimators : public Processor {
     * meaning only tracks with less than one curl.
     */
     double getFlightLength(const Track*);
+    double getFlightLengthHitByHit(const Track*);
+
 
     /**
     *   TOFClosest         -  ToF of the CalorimeterHit closest to track entry
